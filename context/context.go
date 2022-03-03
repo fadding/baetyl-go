@@ -1,11 +1,17 @@
 package context
 
 import (
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"github.com/baetyl/baetyl-go/v2/context/model"
+	"gorm.io/gorm"
 	"io/ioutil"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/baetyl/baetyl-go/v2/errors"
 	"github.com/baetyl/baetyl-go/v2/http"
@@ -13,6 +19,7 @@ import (
 	"github.com/baetyl/baetyl-go/v2/mqtt"
 	"github.com/baetyl/baetyl-go/v2/pki"
 	"github.com/baetyl/baetyl-go/v2/utils"
+	"gorm.io/driver/mysql"
 )
 
 var (
@@ -30,11 +37,12 @@ type Context interface {
 	AppVersion() string
 	// ServiceName returns service name from data.
 	ServiceName() string
-	// ConfFile returns config file from data.
-	ConfFile() string
 
 	// SystemConfig returns the config of baetyl system from data.
 	SystemConfig() *SystemConfig
+
+	//MysqlConnUrl return database's url
+	MysqlConnUrl() string
 
 	// Log returns logger interface.
 	Log() *log.Logger
@@ -61,7 +69,7 @@ type Context interface {
 	// LoadCustomConfig loads custom config.
 	// If 'files' is empty, will load config from default path,
 	// else the first file path will be used to load config from.
-	LoadCustomConfig(cfg interface{}, files ...string) error
+	LoadSystemCustomConfig() (*SystemConfig, error)
 	// NewFunctionHttpClient creates a new function http client.
 	NewFunctionHttpClient() (*http.Client, error)
 	// NewSystemBrokerClientConfig creates the system config of broker
@@ -78,13 +86,12 @@ type ctx struct {
 }
 
 // NewContext creates a new context
-func NewContext(confFile string) Context {
-	if confFile == "" {
-		confFile = os.Getenv(KeyConfFile)
+func NewContext(mysqlConnUrl string) Context {
+	if mysqlConnUrl == "" {
+		mysqlConnUrl = os.Getenv(KeyMysqlConnUrl)
 	}
-
 	c := &ctx{}
-	c.Store(KeyConfFile, confFile)
+	c.Store(KeyMysqlConnUrl, mysqlConnUrl)
 	c.Store(KeyNodeName, os.Getenv(KeyNodeName))
 	c.Store(KeyAppName, os.Getenv(KeyAppName))
 	c.Store(KeyAppVersion, os.Getenv(KeyAppVersion))
@@ -101,10 +108,9 @@ func NewContext(confFile string) Context {
 		lfs = append(lfs, log.Any("service", c.ServiceName()))
 	}
 	c.log = log.With(lfs...)
-	c.log.Info("to load config file", log.Any("file", c.ConfFile()))
+	c.log.Info("to load config from db")
 
-	sc := &SystemConfig{}
-	err := c.LoadCustomConfig(sc)
+	sc, err := c.LoadSystemCustomConfig()
 	if err != nil {
 		c.log.Error("failed to load system config, to use default config", log.Error(err))
 		utils.UnmarshalYAML(nil, sc)
@@ -154,7 +160,7 @@ func NewContext(confFile string) Context {
 		c.log.Error("failed to init logger", log.Error(err))
 	}
 	c.log = _log
-	c.log.Debug("context is created", log.Any("file", confFile), log.Any("conf", sc))
+	c.log.Debug("context is created", log.Any("conf", sc))
 	return c
 }
 
@@ -190,8 +196,8 @@ func (c *ctx) ServiceName() string {
 	return v.(string)
 }
 
-func (c *ctx) ConfFile() string {
-	v, ok := c.Load(KeyConfFile)
+func (c *ctx) MysqlConnUrl() string {
+	v, ok := c.Load(KeyMysqlConnUrl)
 	if !ok {
 		return ""
 	}
@@ -241,15 +247,18 @@ func (c *ctx) CheckSystemCert() error {
 	return nil
 }
 
-func (c *ctx) LoadCustomConfig(cfg interface{}, files ...string) error {
-	f := c.ConfFile()
-	if len(files) > 0 && len(files[0]) > 0 {
-		f = files[0]
+func (c *ctx) LoadSystemCustomConfig() (*SystemConfig, error) {
+	//todo need to merge db inStance
+	db, err := gorm.Open(mysql.Open(c.MysqlConnUrl()), &gorm.Config{})
+	if err != nil {
+		return nil, errors.Trace(err)
 	}
-	if utils.FileExists(f) {
-		return errors.Trace(utils.LoadYAML(f, cfg))
+	systemConfig, err := GetSystemConfig(db)
+	if err != nil {
+		return nil, errors.Trace(err)
+	} else {
+		return &systemConfig, nil
 	}
-	return errors.Trace(utils.UnmarshalYAML(nil, cfg))
 }
 
 func (c *ctx) NewFunctionHttpClient() (*http.Client, error) {
@@ -298,4 +307,82 @@ func (c *ctx) NewSystemBrokerClient(subTopics []mqtt.QOSTopic) (*mqtt.Client, er
 		return nil, err
 	}
 	return client, nil
+}
+
+func GetSystemConfig(db *gorm.DB) (SystemConfig, error) {
+	systemConfList, systemConfListErr := model.SystemConfMgr(db).GetByOptions()
+	for key, errNode := range map[string]error{
+		"systemConfListErr": systemConfListErr} {
+		if errNode != nil {
+			return SystemConfig{}, fmt.Errorf("%s get list error,info:%s", key, errNode.Error())
+		}
+	}
+	if len(systemConfList) <= 0 {
+		return SystemConfig{}, errors.New("system config can not be empty,please config")
+	}
+	//todo  specific version
+	latestSystemConfig := systemConfList[len(systemConfList)-1]
+	SubscriptionsList := make([]mqtt.QOSTopic, 0)
+	if err := json.Unmarshal([]byte(latestSystemConfig.BrokerSubscriptions), &SubscriptionsList); err != nil {
+		return SystemConfig{}, fmt.Errorf("latestSystemConfig.BrokerSubscriptions is not a json formate,err:%s", err.Error())
+	}
+	return SystemConfig{
+		Certificate: utils.Certificate{
+			CA:                 latestSystemConfig.CertCa,
+			Key:                latestSystemConfig.CertKey,
+			Cert:               latestSystemConfig.CertCert,
+			Name:               latestSystemConfig.CertName,
+			InsecureSkipVerify: latestSystemConfig.CertInsecureSkipVerify,
+			ClientAuthType:     tls.ClientAuthType(latestSystemConfig.CertClientAuthType),
+		},
+		Function: http.ClientConfig{
+			Address:               latestSystemConfig.FunctionAddress,
+			Timeout:               time.Second * time.Duration(latestSystemConfig.FunctionTimeout),
+			KeepAlive:             time.Second * time.Duration(latestSystemConfig.FunctionKeepalive),
+			MaxIdleConns:          latestSystemConfig.FunctionMaxIDleConns,
+			IdleConnTimeout:       time.Second * time.Duration(latestSystemConfig.FunctionIDleConnTimeout),
+			TLSHandshakeTimeout:   time.Second * time.Duration(latestSystemConfig.FunctionTLSHandshakeTimeout),
+			ExpectContinueTimeout: time.Second * time.Duration(latestSystemConfig.FunctionExpectContinueTimeout),
+			Certificate: utils.Certificate{
+				CA:                 latestSystemConfig.FunctionCert,
+				Key:                latestSystemConfig.FunctionKey,
+				Cert:               latestSystemConfig.FunctionCert,
+				Name:               latestSystemConfig.FunctionName,
+				InsecureSkipVerify: latestSystemConfig.FunctionInsecureSkipVerify,
+				ClientAuthType:     tls.ClientAuthType(latestSystemConfig.FunctionClientAuthType),
+			},
+		},
+		Broker: mqtt.ClientConfig{
+			Address:              latestSystemConfig.BrokerAddress,
+			Username:             latestSystemConfig.BrokerUsername,
+			Password:             latestSystemConfig.BrokerPassword,
+			ClientID:             latestSystemConfig.BrokerClientID,
+			CleanSession:         latestSystemConfig.BrokerCleanSession,
+			Timeout:              time.Second * time.Duration(latestSystemConfig.BrokerTimeout),
+			KeepAlive:            time.Second * time.Duration(latestSystemConfig.BrokerKeepalive),
+			MaxReconnectInterval: time.Second * time.Duration(latestSystemConfig.BrokerMaxReconnectInterval),
+			MaxCacheMessages:     latestSystemConfig.BrokerMaxCacheMessages,
+			DisableAutoAck:       latestSystemConfig.BrokerDisableAutoAck,
+			Subscriptions:        SubscriptionsList,
+			Certificate: utils.Certificate{
+				CA:                 latestSystemConfig.BrokerCa,
+				Key:                latestSystemConfig.BrokerKey,
+				Cert:               latestSystemConfig.BrokerCert,
+				Name:               latestSystemConfig.BrokerName,
+				InsecureSkipVerify: latestSystemConfig.BrokerInsecureSkipVerify,
+				ClientAuthType:     tls.ClientAuthType(latestSystemConfig.BrokerClientAuthType),
+			},
+		},
+		Logger: log.Config{
+			Level:       latestSystemConfig.LoggerLevel,
+			Encoding:    latestSystemConfig.LoggerEncoding,
+			Filename:    latestSystemConfig.LoggerFilename,
+			Compress:    latestSystemConfig.LoggerCompress,
+			MaxAge:      latestSystemConfig.LoggerMaxAge,
+			MaxSize:     latestSystemConfig.LoggerMaxSize,
+			MaxBackups:  latestSystemConfig.LoggerMaxBackups,
+			EncodeTime:  latestSystemConfig.LoggerEncodeTime,
+			EncodeLevel: latestSystemConfig.LoggerEncodeLevel,
+		},
+	}, nil
 }

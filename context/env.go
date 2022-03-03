@@ -11,7 +11,7 @@ import (
 // All keys
 const (
 	KeyBaetyl             = "BAETYL"
-	KeyConfFile           = "BAETYL_CONF_FILE"
+	KeyMysqlConnUrl       = "BAETYL_MYSQL_CONN_URL"
 	KeyNodeName           = "BAETYL_NODE_NAME"
 	KeyAppName            = "BAETYL_APP_NAME"
 	KeyAppVersion         = "BAETYL_APP_VERSION"

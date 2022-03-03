@@ -16,7 +16,7 @@ func Run(handle func(Context) error) {
 	var h bool
 	var c string
 	flag.BoolVar(&h, "h", false, "this help")
-	flag.StringVar(&c, "c", "etc/baetyl/conf.yml", "the configuration file")
+	flag.StringVar(&c, "db_url", "root:pass@tcp(127.0.0.1:3306)/database?charset=utf8mb4&parseTime=True&loc=Local", "the url of mysql's connection")
 	flag.Parse()
 	if h {
 		flag.Usage()
