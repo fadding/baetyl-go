@@ -125,15 +125,15 @@ func NewContext(confFile string) Context {
 		devices[dev.Name] = dev
 	}
 	c.devices = devices
-	mqtt, err := c.Context.NewSystemBrokerClient(subs)
-	if err != nil {
-		c.log.Warn("fail to create system broker client", log.Any("error", err))
-	}
-	c.mqtt = mqtt
-	c.msgChs = make(map[string]chan *v1.Message)
+	/*	mqtt, err := c.Context.NewSystemBrokerClient(subs)
+		if err != nil {
+			c.log.Warn("fail to create system broker client", log.Any("error", err))
+		}*/
+	//c.mqtt = mqtt
+	/*c.msgChs = make(map[string]chan *v1.Message)
 	if err := c.mqtt.Start(newObserver(c.msgChs, c.log)); err != nil {
 		c.log.Warn("fail to start mqtt client", log.Any("error", err))
-	}
+	}*/
 	return c
 }
 

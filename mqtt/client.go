@@ -31,9 +31,10 @@ func NewClient(ops *ClientOptions) *Client {
 }
 
 func (c *Client) Start(obs Observer) error {
-	return c.tomb.Go(func() error {
+	/*return c.tomb.Go(func() error {
 		return c.connecting(obs)
-	})
+	})*/
+	return nil
 }
 
 // Publish sends a publish packet
